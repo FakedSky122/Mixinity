@@ -2,12 +2,32 @@ import wave
 import audioop
 import struct
 import winsound
+from tkinter import filedialog
+import pydub
+from pydub import AudioSegment
+
+def FileOpen():
+    global file, fileFormat
+    title = 'Mixinity v'+version+'：打开文件'
+    #r = filedialog.askopenfilename(title=title,filetypes=[('波形音频文件', '*.wav'), ('全部文件', '*')])
+    r = filedialog.askopenfilename(title=title)
+    #print('文件:',r)
+    file = r
+    fileName = file.split('/')[-1]
+    fileFormat = fileName.split('.')[-1]
+    sound=AudioSegment.from_file(file=file,format=fileFormat)
+    sound.export(out_f='wavfile_buffer.wav', format='wav')  # 用于保存wav音频文件
 
 #info
-version = '1.5'
+version = '1.7'
 print('Mixinity v'+version)
-file = input('打开文件\n文件名：')
-with wave.open(file, 'rb') as wav:
+fileopen = input('打开文件\n选择文件打开/输入文件名打开[1/2]：')
+if fileopen == '1':
+    FileOpen()
+else:
+    file = input('打开文件\n输入文件名：')
+
+with wave.open('wavfile_buffer.wav', 'rb') as wav:
     print('\n文件信息：')
     info = wav.getparams()
     nchannels, sampwidth, framerate, nframes, comptype, compname = info
@@ -15,6 +35,9 @@ with wave.open(file, 'rb') as wav:
     print("采样宽度(字节):", sampwidth)
     print("采样率(Hz):", framerate)
     print("总帧数:", nframes)
+    if fileFormat != 'wav':
+        comptype = fileFormat
+        compname = fileFormat
     print("压缩类型:", comptype)
     print("压缩说明:", compname)
     print('位深度：',sampwidth*8,'Bit')
@@ -23,9 +46,9 @@ with wave.open(file, 'rb') as wav:
     size = nframes * sampwidth * nchannels / 1024 / 1024
     #code_rate = nframes * sampwidth * nchannels / (nframes / framerate)
     code_rate = sampwidth * nchannels * framerate / 125
-    print('文件大小：',round(size*100)/100,'MiB')
+    print('文件大小(无压缩)：',round(size*100)/100,'MiB')
     data = wav.readframes(info.nframes)
-    print('码率：',code_rate,'kbps')
+    print('码率(无压缩)：',code_rate,'kbps')
 
 while True:
     cho = input('\n[F]文件 [E]效果 [C]剪辑 [S]立体声混音 [A]关于 [Q]退出\n> ')
@@ -153,25 +176,20 @@ while True:
             winsound.PlaySound('buffer.wav', winsound.SND_FILENAME)
             
     elif inp == 'f' or inp == 'F':
-        new_rate = int(input('新采样率(Hz)：'))
+        new_rate = int(input('（警告：非整数倍的采样率转换容易导致爆音和卡顿）\n新采样率(Hz)：'))
         data, state = audioop.ratecv(data, sampwidth, nchannels, framerate, new_rate, None)
         framerate = new_rate
 
     elif inp == 'w' or inp == 'W':
         new_bitdepth = int(input('新位深度(bit)：'))
-        if new_bitdepth == 8:
-            # 原始数据是 16-bit（2 字节）整型
-            samples = list(struct.unpack('<' + 'h' * (len(data) // 2), data))  # 'h' = signed 16-bit
-            # 将 16-bit [-32768, 32767] 映射到 （x bit [0,2^x-1]）8-bit [0, 255]
-            new_samples = [(s + 32768) // 256 for s in samples]  # 简单线性缩放 + 截断
-            data = struct.pack('<' + 'B' * len(new_samples), *new_samples)  # 'B' = unsigned 8-bit
-            sampwidth = 1
-        else:
-            sampwidth = round(new_bitdepth/8)
+        new_sampwidth = round(new_bitdepth / 8)
+        if new_sampwidth < 1:
+            new_sampwidth = 1
+        data = audioop.lin2lin(data, sampwidth, new_sampwidth)
+        sampwidth = new_sampwidth
+        if sampwidth == 1: #8bit 无符号
+            data = audioop.bias(data, 1, 128)
         
-        if sampwidth < 1:
-            sampwidth = 1
-
     elif inp == 'l' or inp == 'L':
         end_rate = int(input('截止频率(Hz)：')) * 10
         high_cut, state = audioop.ratecv(data, sampwidth, nchannels, framerate, end_rate, None) #完全高切
@@ -202,11 +220,28 @@ while True:
     
     elif inp == 'c' or inp == 'C':
         if cho == 's' or cho == 'S':
+            '''
+            #中置声道提取
             lefts = audioop.tomono(data, sampwidth, 1, 0) #提取左声道
             rights = audioop.tomono(data, sampwidth, 0, -1) #提取右声道（反相）
-            data = audioop.add(lefts, rights, sampwidth) #叠加
+            #Dr. Ba. 提取
+            bass,state = audioop.ratecv(data, sampwidth, nchannels, framerate, framerate//150, None) #降采样提取低音
+            bass,state = audioop.ratecv(bass, sampwidth, nchannels, framerate//150, framerate, None) #升采样用于叠加
+            bass = audioop.mul(bass, sampwidth, 0.7)
+            data = audioop.add(lefts, rights, sampwidth) #叠加左，负右声道
+            data = audioop.tostereo(data, sampwidth, 0.5, 0.5)
+            minlen = min(len(data),len(bass)) #确保长度一致
+            data = audioop.add(data[:minlen], bass[:minlen], sampwidth) #叠加侧声道与低音
             data = audioop.mul(data, sampwidth, 1.5)
-            nchannels = 1
+            '''
+            lefts = audioop.tomono(data, sampwidth, 0.5, 0) #提取左声道
+            rights = audioop.tomono(data, sampwidth, 0, -0.5) #提取右声道（反相）
+            data = audioop.add(lefts, rights, sampwidth) #叠加
+            bass,state = audioop.ratecv(data, sampwidth, 1, framerate, framerate//30, None) #降采样
+            bass,state = audioop.ratecv(bass, sampwidth, 1, framerate//30, framerate, state) #升采样
+            minLen = min(len(data), len(bass))
+            data = audioop.add(data[:minLen], bass[:minLen], sampwidth) #叠加
+        
         elif cho == 'f' or cho == 'F':
             cover_file = input('打开叠加的文件\n文件名：')
             with wave.open(cover_file, 'rb') as cover_wav:
